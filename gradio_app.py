@@ -8,10 +8,13 @@ import re
 import textwrap
 from typing import List, Optional, Tuple, Union
 
+import glob
 import torch
 from huggingface_hub import snapshot_download
 
 import gradio as gr
+
+from hymotion.utils.visualize_mesh_web import get_cached_smpl_frames
 
 
 def try_to_download_model():
@@ -116,6 +119,82 @@ def generate_motion_on_gpu(
         output_dir=output_dir,
     )
     return html_content, fbx_files
+
+
+@spaces.GPU(duration=120)
+def generate_smpl_frames_on_gpu(
+    text: str,
+    duration: float,
+    seeds_csv: str,
+    cfg_scale: float,
+) -> list:
+    """Generate motion and return SMPL frames as JSON for VSCode extension."""
+    runtime = _init_runtime_if_needed()
+    output_dir = _global_args.output_dir
+
+    runtime.generate_motion(
+        text=text,
+        seeds_csv=seeds_csv,
+        duration=duration,
+        cfg_scale=cfg_scale,
+        output_format="dict",
+        original_text=text,
+        output_dir=output_dir,
+    )
+
+    # Find and return frames from saved NPZ files
+    meta_files = sorted(
+        glob.glob(os.path.join(output_dir, "*_meta.json")),
+        key=os.path.getmtime,
+        reverse=True,
+    )
+    if meta_files:
+        base_filename = os.path.basename(meta_files[0]).replace("_meta.json", "")
+        return get_cached_smpl_frames(output_dir, base_filename)
+    return []
+
+
+def smpl_frames_api(
+    text: str,
+    duration: float = 5.0,
+    seeds: str = "0,1,2,3",
+    cfg_scale: float = 5.0,
+) -> dict:
+    """API endpoint for VSCode extension."""
+    try:
+        if not text or not text.strip():
+            return {"status": "error", "error": "Text required", "frames": [], "metadata": {}}
+
+        duration = max(0.5, min(12.0, float(duration)))
+        cfg_scale = max(1.0, min(10.0, float(cfg_scale)))
+        seed_list = [int(s.strip()) for s in seeds.split(",") if s.strip()] or [0, 1, 2, 3]
+
+        frames = generate_smpl_frames_on_gpu(
+            text.strip(),
+            duration,
+            ",".join(str(s) for s in seed_list[:4]),
+            cfg_scale,
+        )
+
+        if not frames:
+            return {"status": "error", "error": "No frames generated", "frames": [], "metadata": {}}
+
+        return {
+            "status": "success",
+            "frames": frames,
+            "metadata": {
+                "prompt": text.strip(),
+                "duration": duration,
+                "fps": 30,
+                "total_frames": len(frames),
+                "seeds": seed_list[:4],
+                "cfg_scale": cfg_scale,
+            },
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"status": "error", "error": f"{type(e).__name__}: {str(e)}", "frames": [], "metadata": {}}
 
 
 # define data sources
@@ -661,6 +740,20 @@ class T2MGradioUI:
 
             # Footer
             gr.Markdown(FOOTER_MD, elem_classes=["footer"])
+
+            # Add hidden API endpoint for VSCode extension
+            with gr.Row(visible=False):
+                api_text = gr.Textbox()
+                api_duration = gr.Number(value=5.0)
+                api_seeds = gr.Textbox(value="0,1,2,3")
+                api_cfg = gr.Number(value=5.0)
+                api_output = gr.JSON()
+                gr.Button().click(
+                    fn=smpl_frames_api,
+                    inputs=[api_text, api_duration, api_seeds, api_cfg],
+                    outputs=[api_output],
+                    api_name="smpl_frames",
+                )
 
             self._bind_events()
             demo.load(fn=self._get_header_text, outputs=[self.header_md])
