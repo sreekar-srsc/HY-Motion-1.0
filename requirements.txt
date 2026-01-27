@@ -1,5 +1,7 @@
 --extra-index-url https://gitlab.inria.fr/api/v4/projects/18692/packages/pypi/simple
 huggingface_hub==0.30.0
+gradio==4.44.0
+spaces
 
 torch==2.5.1
 torchvision==0.20.1
